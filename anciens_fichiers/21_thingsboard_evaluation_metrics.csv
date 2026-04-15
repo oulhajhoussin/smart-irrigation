@@ -1,0 +1,2 @@
+timestamp,node_id,counter,soil_pct,rssi,missing_packets,payload_bytes,decision_latency_ms,jitter_ms,cpu_percent,ram_percent,gateway_batt_pct,gateway_current_ma
+1775553660.332628,node2,5824,0,-61,0,96,114.2411,114.2411,0.0,3.6,98,0.0

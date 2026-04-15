@@ -1,0 +1,16 @@
+Commandes à exécuter dans le terminal du Raspberry Pi :
+Arrêter l'ancienne version :
+
+Bash
+pkill -f streamlit
+Mettre à jour le fichier : Remplace tout le contenu de ton ancien app.py par le code ci-dessus.
+
+Installer la dépendance MQTT :
+
+Bash
+source env_iot/bin/activate
+pip install paho-mqtt
+Relancer le serveur en arrière-plan :
+
+Bash
+nohup streamlit run app.py --server.headless true --server.address 0.0.0.0 > streamlit_output.log 2>&1 &
