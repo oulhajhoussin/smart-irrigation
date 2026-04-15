@@ -76,12 +76,12 @@ except Exception as e:
 # Initialisation Cloud/MLOps (Kafka Producer)
 if KafkaProducer is not None:
     try:
-        KAFKA_HOST = os.getenv('KAFKA_HOST', '192.168.100.97')  # IP de votre PC Windows
+        KAFKA_HOST = os.getenv('KAFKA_HOST', '192.168.100.97:9093')  # IP de votre PC Windows + port externe
         kafka_producer = KafkaProducer(
-            bootstrap_servers=[f'{KAFKA_HOST}:9092'],
+            bootstrap_servers=[KAFKA_HOST],
             value_serializer=lambda v: json.dumps(v).encode('utf-8')
         )
-        print(f"☁️ Connecté au Broker Kafka sur {KAFKA_HOST}:9092.")
+        print(f"☁️ Connecté au Broker Kafka sur {KAFKA_HOST}.")
     except Exception as e:
         kafka_producer = None
         print(f"⚠️ Serveur Kafka non détecté ({e}). Mode Local CSV maintenu.")
@@ -89,10 +89,11 @@ else:
     kafka_producer = None
     print("⚠️ Module 'kafka-python' non installé. Ignorer l'export Cloud.")
 
-# En-tête STRICT du nouveau dataset (18 colonnes)
+# En-tête STRICT du nouveau dataset (23 colonnes)
 HEADERS = ['timestamp', 'node_id', 'counter', 'soil_pct', 'raw_data', 'payload_bytes', 'rssi', 'snr', 
            'rtt_cloud_ms', 'decision_latency_ms', 'jitter_ms', 'missing_packets', 'cpu_percent', 
-           'ram_percent', 'node_batt_pct', 'node_current_ma', 'gateway_batt_pct', 'gateway_current_ma']
+           'ram_percent', 'node_batt_pct', 'node_current_ma', 'gateway_batt_pct', 'gateway_current_ma',
+           'operating_mode', 'ml_decision', 'pump_state', 'valve1_state', 'valve2_state']
 
 def on_connect(client, userdata, flags, rc):
     print(f"✅ Connecté au broker MQTT local (Code {rc})")
@@ -122,6 +123,12 @@ def on_message(client, userdata, msg):
         
         # NOUVEAU : Prêt à capturer la latence dynamique !
         decision_latency_ms = data.get("decision_latency_ms", "") 
+        
+        operating_mode = data.get("operating_mode", "")
+        ml_decision = data.get("ml_decision", "")
+        pump_state = data.get("pump_state", "")
+        valve1_state = data.get("valve1_state", "")
+        valve2_state = data.get("valve2_state", "")
         
         counter = ""
         soil_pct = ""
@@ -155,7 +162,12 @@ def on_message(client, userdata, msg):
             node_batt_pct,          # [15] batterie Arduino (fixée)
             node_current_ma,        # [16] courant Arduino (fixé)
             gateway_batt_pct,       # [17] batterie Gateway
-            gateway_current_ma      # [18] courant Gateway
+            gateway_current_ma,     # [18] courant Gateway
+            operating_mode,         # [19] mode de fonctionnement
+            ml_decision,            # [20] décision machine learning
+            pump_state,             # [21] état de la pompe
+            valve1_state,           # [22] état de la vanne 1
+            valve2_state             # [23] état de la vanne 2
         ]
         
         # Mode Append : On n'écrit les headers que si le fichier est vide ou inexistant
@@ -166,7 +178,7 @@ def on_message(client, userdata, msg):
                 writer.writerow(HEADERS)
             writer.writerow(row)
             
-        print(f"[OK] 💾 Données loggées pour {node_id} (Humidité: {soil_pct}%, RSSI: {rssi}, Batterie: {node_batt_pct}%)")
+        print(f"[OK] 💾 Données loggées pour {node_id} (Humidité: {soil_pct}%, RSSI: {rssi}, ML: {ml_decision}, Pump: {pump_state}, V1: {valve1_state}, V2: {valve2_state}, Mode: {operating_mode})")
         
         # =========================================================
         # --- 3. LOGIQUE D'ARROSAGE + IA (AVANT L'ENVOI KAFKA) ---
@@ -235,7 +247,12 @@ def on_message(client, userdata, msg):
                     "snr": float(snr) if snr != "" else 0.0,
                     "gateway_batt_pct": float(gateway_batt_pct) if gateway_batt_pct != "" else 100.0,
                     "cpu_percent": cpu_p,
-                    "ram_percent": ram_p
+                    "ram_percent": ram_p,
+                    "operating_mode": operating_mode,
+                    "ml_decision": ml_decision,
+                    "pump_state": pump_state,
+                    "valve1_state": valve1_state,
+                    "valve2_state": valve2_state
                 }
                 kafka_producer.send("iot_smart_irrigation", kafka_payload)
             except Exception as k_err:

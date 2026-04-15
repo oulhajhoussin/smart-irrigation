@@ -52,6 +52,10 @@ const unsigned long AP_TIMEOUT = 30 * 60 * 1000;
 int last_hum_node1 = 0; 
 int last_hum_node2 = 0;
 
+// Ajout variables globales pour décision IA
+int ml_decision_node1 = 0;
+int ml_decision_node2 = 0;
+
 void handleRoot() {
   String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
   html += "<title>Tableau de Bord EDGE</title>";
@@ -103,45 +107,41 @@ void callback(char* topic, byte* payload, unsigned int length) {
   for (int i = 0; i < length; i++) {
     message += (char)payload[i];
   }
-  
   if (String(topic) == "irrigation/mode") {
     operating_mode = message;
     Serial.println("\n🔄 BASCULEMENT D'ARCHITECTURE : Le système passe en mode " + operating_mode);
     return;
   }
-  
   if (String(topic) == "irrigation/control") {
     if (operating_mode == "EDGE") {
       Serial.println("⚠️ Ordre Fog ignoré : Le TTGO est en mode EDGE autonome.");
       return;
     }
-    
     Serial.printf("📥 Ordre Fog reçu : %s\n", message.c_str());
-    
     if (message == "NODE1_ON") {
       unsigned long rtt = millis() - last_tx_time_node1;
-      last_latency_ms = (float)rtt; // MISE A JOUR MQTT
-      Serial.printf("⏱️ [TEST LATENCE] FOG RTT (Node1) : %lu ms\n", rtt);
+      last_latency_ms = (float)rtt;
       digitalWrite(VALVE1_PIN, LOW);
       isNode1Watering = true;
+      ml_decision_node1 = 1;
     } else if (message == "NODE1_OFF") {
       unsigned long rtt = millis() - last_tx_time_node1;
-      last_latency_ms = (float)rtt; // MISE A JOUR MQTT
-      Serial.printf("⏱️ [TEST LATENCE] FOG RTT (Node1) : %lu ms\n", rtt);
+      last_latency_ms = (float)rtt;
       digitalWrite(VALVE1_PIN, HIGH);
       isNode1Watering = false;
+      ml_decision_node1 = 0;
     } else if (message == "NODE2_ON") {
       unsigned long rtt = millis() - last_tx_time_node2;
-      last_latency_ms = (float)rtt; // MISE A JOUR MQTT
-      Serial.printf("⏱️ [TEST LATENCE] FOG RTT (Node2) : %lu ms\n", rtt);
+      last_latency_ms = (float)rtt;
       digitalWrite(VALVE2_PIN, LOW);
       isNode2Watering = true;
+      ml_decision_node2 = 1;
     } else if (message == "NODE2_OFF") {
       unsigned long rtt = millis() - last_tx_time_node2;
-      last_latency_ms = (float)rtt; // MISE A JOUR MQTT
-      Serial.printf("⏱️ [TEST LATENCE] FOG RTT (Node2) : %lu ms\n", rtt);
+      last_latency_ms = (float)rtt;
       digitalWrite(VALVE2_PIN, HIGH);
       isNode2Watering = false;
+      ml_decision_node2 = 0;
     }
     updatePumpState();
   }
@@ -238,29 +238,22 @@ void loop() {
 
   int packetSize = LoRa.parsePacket();
   if (!packetSize) return;
-
   String msg;
   while (LoRa.available()) msg += (char)LoRa.read();
-  
   int rssi = LoRa.packetRssi();
   float snr = LoRa.packetSnr();
-
   String nodeId = "unknown";
   int commaIndex = msg.indexOf(',');
   if (commaIndex > 0) {
     nodeId = msg.substring(0, commaIndex);
-    nodeId.toLowerCase(); 
+    nodeId.toLowerCase();
   }
-
   if (nodeId != "node1" && nodeId != "node2") return;
-
   int lastCommaIndex = msg.lastIndexOf(',');
-  int humidity_pct = 50; 
+  int humidity_pct = 50;
   if (lastCommaIndex > 0) {
     humidity_pct = msg.substring(lastCommaIndex + 1).toInt();
   }
-
-  // --- CALCUL DE L'INERTIE (Dérivée temporelle pour l'A.I.) ---
   float current_soil_pct_diff = 0.0;
   if (nodeId == "node1") {
     if (last_hum_node1 != 0) current_soil_pct_diff = (float)(humidity_pct - last_hum_node1);
@@ -270,15 +263,13 @@ void loop() {
     if (last_hum_node2 != 0) current_soil_pct_diff = (float)(humidity_pct - last_hum_node2);
     last_hum_node2 = humidity_pct;
   }
-
   if (operating_mode == "EDGE") {
-    unsigned long edge_start = micros(); 
-    
-    // --- NOUVEAU: INJECTION DE L'A.I. TINYML ---
+    unsigned long edge_start = micros();
     float features[2] = {(float)humidity_pct, current_soil_pct_diff};
     int ai_decision = ai_edge.predict(features);
-    // ai_decision: 1 = ARROSER, 0 = COUPER
-    
+    if (nodeId == "node1") ml_decision_node1 = ai_decision;
+    if (nodeId == "node2") ml_decision_node2 = ai_decision;
+
     if (ai_decision == 1) {
       if (nodeId == "node1" && !isNode1Watering) {
         digitalWrite(VALVE1_PIN, LOW);
@@ -330,7 +321,12 @@ void loop() {
   json += "\"snr\":" + String(snr, 2) + ",";
   json += "\"gateway_batt_pct\":" + String(battPercent) + ",";
   json += "\"gateway_current_ma\":" + String(battCurrent_mA, 2) + ",";
-  json += "\"decision_latency_ms\":" + String(last_latency_ms, 3); // NOUVEAU: Ajout de la latence au MQTT !
+  json += "\"decision_latency_ms\":" + String(last_latency_ms, 3) + ",";
+  json += "\"operating_mode\":\"" + operating_mode + "\",";
+  json += "\"ml_decision\":" + String(nodeId == "node1" ? ml_decision_node1 : ml_decision_node2) + ",";
+  json += "\"pump_state\":" + String((isNode1Watering || isNode2Watering) ? 1 : 0) + ",";
+  json += "\"valve1_state\":" + String(isNode1Watering ? 1 : 0) + ",";
+  json += "\"valve2_state\":" + String(isNode2Watering ? 1 : 0);
   json += "}";
 
   if (isNetworkHealthy) {

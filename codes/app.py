@@ -89,45 +89,43 @@ st.markdown("""
 # ⚠️ IMPORTANT: PostgreSQL tourne dans Docker sur PC LOCAL
 # IP WiFi: 192.168.100.97 (Machine avec Docker Desktop)
 DB_CONFIG = {
-    "host": "192.168.100.97",  # 🔧 Docker sur PC local
+    "host": "192.168.100.97",
     "database": "airflow", 
     "user": "airflow", 
     "password": "airflow", 
-    "port": 5432,  # Type int au lieu de string
+    "port": 5432,
     "connect_timeout": 3
 }
 CSV_FILE = "/home/pi/data_logger.csv" if os.path.exists("/home/pi/data_logger.csv") else "data_logger.csv"
-HEADERS_CSV = ['timestamp', 'node_id', 'counter', 'soil_pct', 'raw_data', 'payload_bytes', 'rssi', 'snr', 'rtt_cloud_ms', 'decision_latency_ms', 'jitter_ms', 'missing_packets', 'cpu_percent', 'ram_percent', 'node_batt_pct', 'node_current_ma', 'gateway_batt_pct', 'gateway_current_ma']
+HEADERS_CSV = [
+    'timestamp', 'node_id', 'counter', 'soil_pct', 'raw_data', 'payload_bytes', 'rssi', 'snr',
+    'rtt_cloud_ms', 'decision_latency_ms', 'jitter_ms', 'missing_packets', 'cpu_percent',
+    'ram_percent', 'node_batt_pct', 'node_current_ma', 'gateway_batt_pct', 'gateway_current_ma',
+    'operating_mode', 'ml_decision', 'pump_state', 'valve1_state', 'valve2_state'
+]
 
 @st.cache_data(ttl=1)
 def fetch_realtime_data():
     df, last_error = pd.DataFrame(), ""
     status = {"mode": "Hors-ligne", "pulse": "offline"}
     total_db_cycles = 0
-    
+
     # 1. Tentative SQL (Priorite Mondiale)
     if psycopg2:
         try:
             conn = psycopg2.connect(**DB_CONFIG)
-            # 🔍 Essayer FIRST la table IoT (Smart Irrigation)
             try:
                 df = pd.read_sql("SELECT * FROM iot_smart_irrigation_raw ORDER BY timestamp DESC LIMIT 2000", conn)
             except:
-                # Fallback à l'ancienne table si elle n'existe pas
                 df = pd.read_sql("SELECT * FROM raw_soil_moisture ORDER BY timestamp DESC LIMIT 2000", conn)
-            
-            # Requete 2 : Le total Reel pour le badge jaune
             cur = conn.cursor()
             try:
-                # Essayer de compter les irrigations dans la nouvelle table
                 cur.execute("SELECT COUNT(*) FROM iot_smart_irrigation_raw WHERE irrigation_status = 1")
             except:
-                # Fallback ancienne logique
                 cur.execute("SELECT SUM(CASE WHEN raw_data LIKE '%ON%' THEN 1 ELSE 0 END) FROM iot_smart_irrigation_raw")
             total_db_cycles = cur.fetchone()[0] or 0
             cur.close()
             conn.close()
-            
             if not df.empty:
                 status = {"mode": "Cloud (SQL)", "pulse": "online"}
                 df.rename(columns={'humidity': 'soil_pct'}, inplace=True)
@@ -137,49 +135,40 @@ def fetch_realtime_data():
     # 2. CSV Fallback (EN CAS DE COUPURE INTERNET)
     if df.empty and os.path.exists(CSV_FILE):
         try:
-            # ✅ FIXE #3 : Parser timestamps ISO correctement
-            # Note: infer_datetime_format a été déprecié en pandas 2.0+
-            df = pd.read_csv(CSV_FILE, names=HEADERS_CSV, 
-                            dtype={'raw_data': str, 'node_id': str},
-                            parse_dates=['timestamp']).tail(1000)  # ← Simplifiée
-            
-            # Formater pour affichage (identique à PostgreSQL)
+            df = pd.read_csv(CSV_FILE, header=0, dtype={'raw_data': str, 'node_id': str}, parse_dates=['timestamp']).tail(1000)
             if not df.empty and 'timestamp' in df.columns:
                 try:
                     df['timestamp'] = pd.to_datetime(df['timestamp']).dt.strftime("%Y-%m-%d %H:%M:%S")
                 except:
-                    # Si le parsing échoue, garder le timestamp tel quel
                     pass
-            
             status = {"mode": "Local (CSV) - Mode Secours 🛡️", "pulse": "online"}
-            # Comptage des pompages dans le CSV
-            total_db_cycles = df['raw_data'].apply(lambda x: 1 if 'ON' in str(x) else 0).sum()
+            total_db_cycles = df['pump_state'].apply(lambda x: 1 if str(x) == '1' else 0).sum()
         except Exception as csv_error: 
             last_error = f"CSV Error: {str(csv_error)}"
-            # ✅ IMPORTANT : Si le CSV échoue, on ne doit pas afficher "Recherche de signal"
-            # On affiche l'erreur pour diagnostic
             st.error(f"❌ Erreur lecture CSV: {csv_error}")
 
+    # Uniformisation des noms et types
     if not df.empty:
-        # Uniformisation des noms
         if 'humidity' in df.columns: df.rename(columns={'humidity': 'soil_pct'}, inplace=True)
         if 'node_id' not in df.columns and 'node' in df.columns: df.rename(columns={'node': 'node_id'}, inplace=True)
-        
-        # Creation de 'ts' robuste (SQL vs CSV)
         if 'timestamp' in df.columns:
             if pd.api.types.is_numeric_dtype(df['timestamp']):
                 df['ts'] = pd.to_datetime(pd.to_numeric(df['timestamp'], errors='coerce'), unit='s')
             else:
                 df['ts'] = pd.to_datetime(df['timestamp'], errors='coerce')
-        
         df['node'] = df['node_id'].astype(str).str.lower().str.strip()
         h_col = 'soil_pct' if 'soil_pct' in df.columns else (df.columns[2] if len(df.columns) > 2 else df.columns[0])
         df['h'] = pd.to_numeric(df[h_col], errors='coerce').ffill().fillna(50)
-        df['pump'] = df['raw_data'].apply(lambda x: 1 if 'ON' in str(x) else 0) if 'raw_data' in df.columns else 0
-        
+        # Utilise la colonne pump_state si elle existe, sinon fallback sur raw_data
+        if 'pump_state' in df.columns:
+            df['pump'] = pd.to_numeric(df['pump_state'], errors='coerce').fillna(0)
+        elif 'raw_data' in df.columns:
+            df['pump'] = df['raw_data'].apply(lambda x: 1 if 'ON' in str(x) else 0)
+        else:
+            df['pump'] = 0
         for col in ['rssi', 'snr', 'decision_latency_ms', 'gateway_batt_pct']:
             if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').ffill().fillna(0)
-    
+
     return df, status, last_error, total_db_cycles
 
 # --- RENDER ---
